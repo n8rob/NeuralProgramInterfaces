@@ -94,6 +94,16 @@ if __name__ == "__main__":
                         default="0 1 2 3 4 5 6 7 8 9 10 11 12",
                         help="Which layers to extract from language model? layer indices separated by spaces\nRecommended: if spacial restrictions allow, use all available layers for data set generation and extract the needed layers at training using the extract_needed_layers function"
                         )
+    parser.add_argument("--seq-len",
+                        type=int,
+                        default=10,
+                        help="window size for inputs to lang model"
+                        )
+    parser.add_argument("--num-iters",
+                        type=int,
+                        default=10,
+                        help="number of times to run lang model forward pass (extracting layers each time)"
+                        )
 
     args = parser.parse_args()
 
@@ -113,49 +123,41 @@ if __name__ == "__main__":
     # num_checks will determine the maximum number of .pkl data files to be generated
     #   of course you can always kill the process once you feel you have enough data
     num_chunks=25 * len(pretrained_models) * len(PRED_INDICES)
-    num_sentences_per_chunk=4000//len(PRED_INDICES)
+    num_sentences_per_chunk=4000//len(PRED_INDICES) # a pkl file should only be so big for loading speed
     num_sentences = num_chunks * num_sentences_per_chunk
-    sent_len=10
-    num_iters=10
-    max_iters=50
+    sent_len=args.seq_len
+    num_iters=args.num_iters
+    max_iters=5 * num_iters # default 50
     assert max_iters >= num_iters
-    top_k=1#.0
+    top_k=1
     top_p=.9
     temperature=1
     # define how sentence label vectors shall be indexed
     FAKE_DATA_INDEX = 0
-    # num_in_word_category = 335
-    # num_word_categories = 3
     UNK_LABEL_INDEX = -2#1 + (num_word_categories * num_in_word_category)
     GPT2_MODEL_INDEX = -1
     # optional_s
     OPTIONAL_S = True # n8 HACK
 
-    # define how dataset will be indexed
-    ORIG_ACTIV_INDEX = 0
-    ORIG_LABEL_INDEX = 1
-    TARG_LABEL_INDEX = 2
-    LANG_MODEL_INDEX = 3
-    META_DATA_INDEX = 4
-    ORIG_TEXT_INDEX = 5
-    PRED_TEXT_INDEX = 6
-    TARG_TEXT_INDEX = 7
-    GPT2_TEXT_INDEX = 8 # the text of what the gpt2 actually produced
+    # define how each data point in the data set will be indexed
+    ORIG_ACTIV_INDEX = 0 # activation arrays concatenated
+    ORIG_LABEL_INDEX = 1 # label of output text
+    TARG_LABEL_INDEX = 2 # this entry no longer used in our implementation
+    LANG_MODEL_INDEX = 3 # pretrained model name
+    META_DATA_INDEX = 4 # relevant meta data including text tokens
+    ORIG_TEXT_INDEX = 5 # input text that yields lang model output text
+    PRED_TEXT_INDEX = 6 # this entry no longer used in our implementation
+    TARG_TEXT_INDEX = 7 # target term/behavior
+    GPT2_TEXT_INDEX = 8 # the text of what the lang model actually produced
 
-    # Construct target classif'n now
-    TARG_CLASSIFICATION = np.ones(len(TARG)+3)
-    TARG_CLASSIFICATION[0] = 0.
-    TARG_CLASSIFICATION[-2] = 0.
-
-    # this is a special option. So special
+    # params to inject the word randomly into inputs to encourage its output
     INJECT_WORDNESS = True
-    INJECT_WORD_RAND_CHANGES = True
+    INJECT_WORD_RAND_CHANGES = True # this one should likely be True if the first one is
 
     # Fix pkl_name:
     if ".pkl" not in pkl_name:
         pkl_name = pkl_name + ".pkl"
     pkl_name_base = pkl_name
-    #pkl_name_word_base = pkl_name_base[:-4] + "_05042020_" + ".pkl"
 
     # Create tokenizers
     model_name = pretrained_models[0]
@@ -166,44 +168,41 @@ if __name__ == "__main__":
         raise NotImplementedError("Only the following tokenizers are supported: {}".format(model_name))
 				
     num_keywords = len(TARG)
-    num_possible_labels = int(1 + num_keywords + 2) # additional labels are for fake/not-fake, UNK/not-UNK, and GPT2/not-GPT2
+    num_possible_labels = int(1 + num_keywords)
 
     model = None
     tokenizer = None
-    if model_name == 'gpt2':
-        model = GPT2LMHeadModel.from_pretrained(model_name)#GPT2Model.from_pretrained(model_name)
+    if 'gpt2' in model_name:
+        model = GPT2LMHeadModel.from_pretrained(model_name)
         tokenizer = gpt2_tokenizer
     else:
         raise NotImplementedError("model_name == {} not supported".format(model_name))
 
-    model.transformer.output_hidden_states = True
+    model.transformer.output_hidden_states = True # necessary to pull activation tensors
     device = torch.device("cpu") 
     if torch.cuda.is_available(): 
         model = model.cuda() 
         device = torch.device("cuda") 
 
     try:
-        # IN THE BEGINNING ##############################################################################################################################
+        # BEGINNING ##############################################################################################################################
 
-        # komya 
-        print("we begin",flush=True)
+        print("and so it begins",flush=True)
         dataset = []
 
         word_to_toks = {}
         word_to_toks[TARG[0]] = []
-        for word in WORDS[TARG[0]]: # komya
+        for word in WORDS[TARG[0]]: 
             word = word.lower()
             gpt2_word_toks = []
-            gpt2_word_toks.append(gpt2_tokenizer.encode(word)) # list of len 1
-            gpt2_word_toks.append(gpt2_tokenizer.encode("this is "+word)[2:]) # token different in sentence context
-            # n8 komya optional_s
-            if OPTIONAL_S:
+            gpt2_word_toks.append(gpt2_tokenizer.encode(word)) # list of veriable len but likely len 1 for small words
+            gpt2_word_toks.append(gpt2_tokenizer.encode("this is "+word)[2:]) # token differs in context
+            if OPTIONAL_S: # for some verbs or nouns we may put an optional 's' on the end
                 gpt2_word_toks.append(gpt2_tokenizer.encode(word+"s"))
                 gpt2_word_toks.append(gpt2_tokenizer.encode("this is "+word+"s")[2:])
             word_to_toks[word] = gpt2_word_toks
             
             word_to_toks[TARG[0]] = word_to_toks[TARG[0]] + word_to_toks[word]
-        #db.set_trace()
 
         # We want to count how many words we got :)
         word_counts = {}
@@ -213,16 +212,16 @@ if __name__ == "__main__":
 
         # And a few other things we need defined outside the loop 
         pkl_counter = 0
-
-        """Now we begin the massive loop of a lifetime...---...---...---...---...---...---...---...---...---...---"""
-
         iterator = -1
+
+        """Now we begin the loop of a lifetime...---...---...---...---...---...---...---...---...---...---"""
 
         with open(mixed_sentence_file,'r') as BIG_FILE:
 
             for line in BIG_FILE:
                 
-                # clean line to some extent
+                # clean line to some extent 
+                #   (due to possible differences in corpora that could tip off the classifer)
                 line = line.lower().strip().strip('.').strip()
                 if len(line.split()) > 100 or len(line.split()) < 4:
                     continue
@@ -233,7 +232,7 @@ if __name__ == "__main__":
                 
                 iterator += 1
 
-                append_to_dataset = True # naively assume we gonna append ha ha ha
+                append_to_dataset = True # naively assume we're gonna append ha ha so naive
 
                 big_array = [] # nxmx1
 
@@ -246,9 +245,6 @@ if __name__ == "__main__":
                 all_text_tokens = cp.deepcopy(tokens)
                 ogog_tokens = cp.deepcopy(tokens)
 
-                #sent = data_row[ORIG_TEXT_INDEX]
-                #generated_sent = ""
-
                 # some constants to set first
                 found_words_dict = {}
                 for word in TARG:
@@ -259,24 +255,20 @@ if __name__ == "__main__":
                 word_found_already = False # This will tell us if we've found a word yet
                 index_of_last_injection = -1 # This is for keeping track of word injection
 
-                # We loop through twenty times now
-                purely_generated_tokens = [] # havne't generated anything yet
+                # We loop through multiple times now
+                purely_generated_tokens = [] # haven't generated anything yet
                 i = -1
                 while True:
                     i += 1
 
                     # Now run the model
                     hidden_states, presents, all_hiddens = model(input_ids=tokens[:,-sent_len:]) # all_hiddens is a list of len
-                                                                    # 25 with tensors of shape 
-                                                                    # (1,15,1024), where 20 is sent_len
-                    #pdb.set_trace() 
+                                                                    # 25 or 13 with tensors of shape (gpt2 medium of small)
+                                                                    # (1,sent_len,1024) or (1,sent_len,768)
                     # Add to big_array
                     if tokens.shape[1] >= sent_len:
                         for pi in PRED_INDICES:
-                            if pi == -1 or pi == len(all_hiddens)-1:
-                                big_array.append(all_hiddens[pi].data[:,:-1,:])
-                            else:
-                                big_array.append(all_hiddens[pi].data)
+                            big_array.append(all_hiddens[pi].data)
 
                     # Now we extract the new token and add it to the list of tokens
                     next_token_logits = hidden_states[0,-1,:]
@@ -285,7 +277,6 @@ if __name__ == "__main__":
                     next_token_list = next_token.tolist()
                     next_word = tokenizer.decode(next_token_list)
                     purely_generated_tokens = purely_generated_tokens + next_token_list
-                    #sent = sent + " " + next_word # we just update this so sent remains accurate for dict
                     #generated_sent = generated_sent + next_word + " "
 
                     # check if the next_token_list is the token we are looking for!!!
@@ -296,9 +287,9 @@ if __name__ == "__main__":
                             if subword in generated_string:
                                 found_words_dict[word] = True
                                 word_found_already = True
-                                time_since_last_injection = i - index_of_last_injection # I want cat to be in the middle of the generated text I think
+                                time_since_last_injection = i - index_of_last_injection # Let's make the target word be in the middle of the generated text
                                 number_of_indices_more_we_need = num_iters - time_since_last_injection
-                                stop_itern = i + number_of_indices_more_we_need # this will gurantee there are no injections in what we call the generated tokens
+                                stop_itern = i + number_of_indices_more_we_need # this will ensure there are no injections in what we call the generated tokens
                     
                     # ...update list of tokens
                     if tokens.shape[1] < sent_len:
@@ -315,16 +306,13 @@ if __name__ == "__main__":
                         break
 
                     if INJECT_WORDNESS and i > num_tokens_needed and (i-num_tokens_needed)%num_iters == 0 and not word_found_already:
-                        #pdb.set_trace()
                         word = random.choice(TARG)
-                        #rand_index = random.choice([1,3]) # 'cat' or 'cats'
                         tokens_to_inject = random.choice(word_to_toks['target words'])
                         num_tokens_to_inject = len(tokens_to_inject)
-                        #db.set_trace()
                         tokens_to_inject = torch.tensor(tokens_to_inject).long().unsqueeze(0).repeat(1,1).cuda()
-                        # token_to_inject
                         # Now we want to change the sentence a bit
                         #    iterate through the tokens and if any of them are nouns, then replace
+                        #    NOTE: it is also valid to replace something other than nouns if that seems more reasonable :)
                         idx_to_replace = None
                         for tok_idx in range(tokens.shape[1]):
                             token_in_question = tokens.squeeze().tolist()[tok_idx]
@@ -333,77 +321,60 @@ if __name__ == "__main__":
                             # Now we want to see if it's a noun
                             doc = nlp(word_in_question)
                             pos = [token.pos_ for token in doc]
-                            if pos == ['NOUN'] and len(word_in_question)>2 and word != word_in_question and word+'s' != word_in_question: # we have a viable noun
-                                # we need all these conditions because spacy thinks single letters are nouns
+                            if pos == ['NOUN'] and len(word_in_question)>2: # we have a viable noun
+                                # we need this conditions because spacy thinks single letters are nouns
                                 idx_to_replace = tok_idx
-                            #pdb.set_trace()
 
                         if idx_to_replace is not None: # we actually found a NOUN to replace
-                            #tokens_before = tokens
-                            tokens = torch.cat((tokens[:,num_tokens_to_inject-1:idx_to_replace], tokens_to_inject, tokens[:,idx_to_replace+1:]),dim=1) #tokens[0,idx_to_replace] = tokens_to_inject
-                            #if tokens.shape[1] != sent_len:
-                            #    pdb.set_trace()
-                            tokens = tokens[:,-sent_len:]
+                            # We knock off the first few tokens if num_tokens_to_inject > 1
+                            tokens = torch.cat((tokens[:,num_tokens_to_inject-1:idx_to_replace], tokens_to_inject, tokens[:,idx_to_replace+1:]),dim=1)
+                            tokens = tokens[:,-sent_len:] # make sure it is the right length
 
                             idx_to_replace_in_all_toks = idx_to_replace - tokens.shape[1] + all_text_tokens.shape[1]
                             all_text_tokens = torch.cat((all_text_tokens[:,:idx_to_replace_in_all_toks], tokens_to_inject, all_text_tokens[:,idx_to_replace_in_all_toks+1:]),dim=1)#all_text_tokens[-1,idx_to_replace_in_all_toks] = token_to_inject
                             # keep track of when this happened
                             index_of_last_injection = i
-                        #pdb.set_trace()
 
 
                 num_gpt2_iters_run = i+1
                 big_array = big_array[-len_for_big_array:]
 				
                 # figure out true classification
-                orig_classification = np.zeros(len(TARG)+3) # FAKE_DATA_INDEX = 0, UNK_LABEL_INDEX = -2, GPT2_MODEL_INDEX = -1
-                orig_classification[GPT2_MODEL_INDEX] = 1.
+                orig_classification = np.zeros(len(TARG)+1)
 				
                 # count words and see if we should append to dataset
                 for i_word, word in enumerate(TARG):
-                    if found_words_dict[word]: # means we found this word
-                        orig_classification[i_word+1] = 1.
+                    if found_words_dict[word]: # means we found this word: so this is a term-postive labeled data point!
+                        # Label: [1, 0]
+                        orig_classification[i_word] = 1.
                         word_counts[word] = word_counts[word] + 1
                         # then check if we should append or not
                         if word_counts[word] > num_sentences:
                             append_to_dataset = False
-                if True not in list(found_words_dict.values()):
-                    orig_classification[UNK_LABEL_INDEX] = 1.
+                if True not in list(found_words_dict.values()): # means this is a term-negative labeled data point!
+                    # Label: [0, 1]
+                    orig_classification[i_word+1] = 1.
                     word_counts['UNK'] = word_counts['UNK'] + 1
-                    if word_counts['UNK'] > 1.2*max([word_counts[word] for word in TARG])+1: # keep the UNKs down!!!!!!
+                    if word_counts['UNK'] > 1.2*max([word_counts[word] for word in TARG])+1: # keep the UNKs down!!! We want balance!!!
                         append_to_dataset = False
                         word_counts['UNK'] = word_counts['UNK'] - 1 # so we actually won't count this one since we're not appending
 
-                if not append_to_dataset: # whats the point of even being here
-                    #continue
-                    pass
-
                 # What will we call "original text" and "generated text"
-                # original text from before loop, actually
-                #pdb.set_trace()
-                #try:
+                
                 assert all_text_tokens.squeeze().tolist()[-sent_len:] == tokens.squeeze().tolist()
-                #except:
-                #    pdb.set_trace()
-                #    raise
-                orig_text_tokens = all_text_tokens[:,-sent_len-num_iters:-num_iters]
-                generated_text_tokens = tokens # komya
+
+                orig_text_tokens = all_text_tokens[:,-sent_len-num_iters:-num_iters] # sent_len tokens that produced generated_text_tokens
+                generated_text_tokens = tokens
 
                 orig_tokens = orig_text_tokens.squeeze().tolist()
                 gpt2_generated_tokens = generated_text_tokens.squeeze().tolist()
-                #try:
-                #    assert len(orig_tokens) == sent_len and len(gpt2_generated_tokens) == num_iters
-                #except:
-                #    pdb.set_trace()
-                #    raise
-                #    append_to_dataset = False
-                #    pass
+
                 orig_text = gpt2_tokenizer.decode(orig_tokens)
                 gpt2_generated_text = gpt2_tokenizer.decode(gpt2_generated_tokens)
 
-                # Now the big_array is a list of length 40 (num_iters*2) of tensors with shape (1,sent_len,1024)
+                # Now the big_array is a list of length (num_iters*len(PRED_INDICES)) of tensors with shape (1,sent_len,emb_dim)
                 big_array = torch.cat(big_array, dim=1)
-                big_array = big_array.permute(1,2,0) # shape is (2*sent_len*num_iters, 1024, 1) now
+                big_array = big_array.permute(1,2,0) # shape is (2*sent_len*num_iters, emb_dim, 1) now, emb_dim will be 1024 or 768
                 big_array = big_array.data.cpu().numpy()
 
                 # We want to save this big_array in the data
@@ -420,27 +391,22 @@ if __name__ == "__main__":
                     datum = [
 			        big_array, # ORIG ACTIV
 			        orig_classification, # ORIG LABEL
-		                TARG_CLASSIFICATION, # None, # TARG LABEL Ugh I could do this but I just don't use it in the single-control version
+			        None, # this no longer used
 			        model_name, # LANG MODEL: model_name an abstraction for 'gpt2'
-                                {'num_gpt2_iters':num_gpt2_iters_run,\
+			        {'num_gpt2_iters':num_gpt2_iters_run,\
                                         'orig_tokens':orig_tokens,\
                                         'gpt2_generated_tokens':gpt2_generated_tokens}, # META DATA
 			        orig_text, # ORIG TEXT (or what we're deeming 'originial text')
 			        None, # PRED TEXT this literally won't exist until we have an NPI
-			        TARG[0], # TARG TEXT so this would need to be TWEAKED for multi-word applications. For now it's 'cat'
-			        gpt2_generated_text # GPT2 TEXT: just generated right here by the GPT2
+			        TARG[0], # TARG TEXT 
+			        gpt2_generated_text # GPT2 TEXT: just generated right here by the GPT2 :D :D
 				    ]
-                    #pdb.set_trace()
                     dataset.append(datum)
-
-                # check for debugging
-                #if len(dataset) == 50:
-                #    pdb.set_trace()
 
                 # Check data len
                 if len(dataset) >= num_sentences_per_chunk:
                     # Then we want to save it
-                    # pkl stuf
+                    # pkl stuff
                     pkl_name = pkl_name_base + "_" + str(pkl_counter)
                     with open(pkl_name,'wb') as f:
                         pkl.dump(dataset,f)
