@@ -70,7 +70,7 @@ if __name__ == "__main__":
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--mixed_sentence_file",
-                        default="/mixed/sentence/file/",
+                        default="./smaller_wiki_books_reddit_shuffled.txt",
 
                         )
     #parser.add_argument("--sentence_content_label_file", 
@@ -83,7 +83,10 @@ if __name__ == "__main__":
     #                    default="dataset_config_dictionary.pkl", 
     #                    )
     parser.add_argument("--save_pkl",
-                        default="/path/to/save/in/",
+                        default="sentence_arrays.pkl",
+                        )
+    parser.add_argument("--target_words",
+                        default="sentence_arrays.pkl",
                         )
     #parser.add_argument("--reduced_sentence_content_label_file", 
     #                    default="", 
